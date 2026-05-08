@@ -85,7 +85,7 @@
               | reject('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
               | map('split', ',')
               | map('first')
-              | map('regex_replace', '^(.*)$', item.item ~ ',\\1')
+                | map('regex_replace', '^', item.item ~ ',')
               | list
             )
           }}
@@ -130,7 +130,7 @@
               | select('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
               | map('split', ',')
               | map('first')
-              | map('regex_replace', '^(.*)$', item.item ~ ',\\1')
+                | map('regex_replace', '^', item.item ~ ',')
               | list
             )
           }}
