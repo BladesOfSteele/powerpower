@@ -1,0 +1,141 @@
+---
+- name: Power down IBM Power environment from HMC
+  hosts: all
+  gather_facts: false
+
+  vars:
+    hmc_auth:
+      username: "{{ hmc_username }}"
+      password: "{{ hmc_password }}"
+
+  tasks:
+    - name: Collect all managed systems
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: "lssyscfg -r sys -F name"
+      register: systems_raw
+      changed_when: false
+
+    - name: Build managed systems list
+      ansible.builtin.set_fact:
+        managed_systems: >-
+          {{
+            (systems_raw.Command_output | default(systems_raw.command_output) | default(''))
+            .splitlines()
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+
+    - name: Initialize shutdown target lists
+      ansible.builtin.set_fact:
+        running_systems: []
+        running_non_vios: []
+        running_vios: []
+
+    - name: Collect state for each managed system
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: "lssyscfg -r sys -m {{ item }} -F state"
+      loop: "{{ managed_systems }}"
+      register: system_state_rows
+      changed_when: false
+      when: managed_systems | length > 0
+
+    - name: Build list of running managed systems
+      ansible.builtin.set_fact:
+        running_systems: "{{ running_systems + [item.item] }}"
+      loop: "{{ system_state_rows.results | default([]) }}"
+      when:
+        - managed_systems | length > 0
+        - (item.Command_output | default(item.command_output) | default('') | trim) == 'Operating'
+
+    - name: Discover running non-VIOS partitions on each running system
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: "lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env"
+      loop: "{{ running_systems }}"
+      register: non_vios_rows
+      changed_when: false
+      when: running_systems | length > 0
+
+    - name: Build running non-VIOS partition list
+      ansible.builtin.set_fact:
+        running_non_vios: >-
+          {{
+            running_non_vios
+            + (
+              (item.Command_output | default(item.command_output) | default(''))
+              .splitlines()
+              | select('search', ',Running,')
+              | reject('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
+              | map('split', ',')
+              | map('first')
+              | map('regex_replace', '^(.*)$', item.item ~ ',\\1')
+              | list
+            )
+          }}
+      loop: "{{ non_vios_rows.results | default([]) }}"
+      when: running_systems | length > 0
+
+    - name: Shut down running non-VIOS partitions with OS immediate
+      ibm.power_hmc.powervm_lpar_instance:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        system_name: "{{ item.split(',')[0] }}"
+        vm_name: "{{ item.split(',')[1] }}"
+        action: shutdown
+        shutdown_option: Immediate
+      loop: "{{ running_non_vios | default([]) }}"
+      when: running_non_vios | default([]) | length > 0
+
+    - name: Discover running VIOS partitions on each running system
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: "lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env"
+      loop: "{{ running_systems }}"
+      register: vios_rows
+      changed_when: false
+      when: running_systems | length > 0
+
+    - name: Build running VIOS partition list
+      ansible.builtin.set_fact:
+        running_vios: >-
+          {{
+            running_vios
+            + (
+              (item.Command_output | default(item.command_output) | default(''))
+              .splitlines()
+              | select('search', ',Running,')
+              | select('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
+              | map('split', ',')
+              | map('first')
+              | map('regex_replace', '^(.*)$', item.item ~ ',\\1')
+              | list
+            )
+          }}
+      loop: "{{ vios_rows.results | default([]) }}"
+      when: running_systems | length > 0
+
+    - name: Shut down all running VIOS partitions immediately
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: >-
+          chsysstate -r lpar -m {{ item.split(',')[0] }}
+          -o shutdown --immed -n {{ item.split(',')[1] }}
+      loop: "{{ running_vios | default([]) }}"
+      when: running_vios | default([]) | length > 0
+
+    - name: Power off running managed systems
+      ibm.power_hmc.power_system:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        system_name: "{{ item }}"
+        action: poweroff
+      loop: "{{ running_systems | default([]) }}"
+      when: running_systems | default([]) | length > 0
