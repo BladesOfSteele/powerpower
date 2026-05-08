@@ -51,6 +51,7 @@
     - name: Initialize target lists
       ansible.builtin.set_fact:
         systems_to_power_on: []
+        all_vios: []
         vios_to_power_on: []
         lpars_to_power_on: []
 
@@ -95,6 +96,24 @@
 
     - name: Build stopped VIOS partition list
       ansible.builtin.set_fact:
+        all_vios: >-
+          {{
+            all_vios
+            + (
+              (
+                row_output
+                if row_output is not string
+                else row_output.splitlines()
+              )
+              | map('trim')
+              | reject('equalto', '')
+              | select('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
+              | map('split', ',')
+              | map('first')
+              | map('regex_replace', '^', item.item ~ ',')
+              | list
+            )
+          }}
         vios_to_power_on: >-
           {{
             vios_to_power_on
@@ -128,6 +147,45 @@
           -o on -n {{ item.split(',')[1] }}
       loop: "{{ vios_to_power_on }}"
       when: vios_to_power_on | length > 0
+
+    - name: Wait until all VIOS partitions are Running with active RMC
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: >-
+          lssyscfg -r lpar -m {{ item.split(',')[0] }}
+          --filter "lpar_names={{ item.split(',')[1] }}" -F state,rmc_state
+      register: vios_rmc_status
+      until: >-
+        (
+          (
+            (
+              vios_rmc_status.Command_output
+              | default(vios_rmc_status.command_output)
+              | default([])
+            )
+            if
+            (
+              vios_rmc_status.Command_output
+              | default(vios_rmc_status.command_output)
+              | default([])
+            ) is not string
+            else
+            (
+              vios_rmc_status.Command_output
+              | default(vios_rmc_status.command_output)
+              | default('')
+            ).splitlines()
+          )
+          | map('trim')
+          | reject('equalto', '')
+          | first
+          | default('')
+        ) is search('^Running,[Aa]ctive$')
+      retries: 30
+      delay: 20
+      loop: "{{ all_vios | unique }}"
+      when: all_vios | length > 0
 
     - name: Discover stopped non-VIOS LPARs on each managed system
       ibm.power_hmc.hmc_command:
@@ -190,6 +248,7 @@
         msg:
           managed_systems: "{{ managed_systems }}"
           systems_powered_on: "{{ systems_to_power_on }}"
+          all_vios: "{{ all_vios | unique }}"
           vios_powered_on: "{{ vios_to_power_on }}"
           requested_lpar_names: "{{ requested_lpar_names }}"
           lpars_powered_on: "{{ lpars_to_power_on }}"
