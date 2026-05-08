@@ -1,0 +1,191 @@
+---
+- name: Power up IBM Power environment from HMC
+  hosts: all
+  gather_facts: false
+  connection: local
+
+  vars:
+    hmc_auth:
+      username: "{{ hmc_username }}"
+      password: "{{ hmc_password }}"
+
+    # Comma-separated list of non-VIOS LPAR names to power on after VIOS boots.
+    # Example: "lpar01,lpar02,lpar03"
+    # lpar_names_csv: "aix7_nim,nim,client01,client02,aix_test,aix_stby"
+
+  tasks:
+    - name: Collect all managed systems
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: "lssyscfg -r sys -F name"
+      register: systems_raw
+      changed_when: false
+
+    - name: Build managed systems list
+      ansible.builtin.set_fact:
+        managed_systems: >-
+          {{
+            (
+              systems_output
+              if systems_output is not string
+              else systems_output.splitlines()
+            )
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+      vars:
+        systems_output: "{{ systems_raw.Command_output | default(systems_raw.command_output) | default([]) }}"
+
+    - name: Parse requested non-VIOS LPAR names from CSV
+      ansible.builtin.set_fact:
+        requested_lpar_names: >-
+          {{
+            lpar_names_csv.split(',')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+
+    - name: Initialize target lists
+      ansible.builtin.set_fact:
+        systems_to_power_on: []
+        vios_to_power_on: []
+        lpars_to_power_on: []
+
+    - name: Collect state for each managed system
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: "lssyscfg -r sys -m {{ item }} -F state"
+      loop: "{{ managed_systems }}"
+      register: system_state_rows
+      changed_when: false
+      when: managed_systems | length > 0
+
+    - name: Build list of systems that are not already Operating
+      ansible.builtin.set_fact:
+        systems_to_power_on: "{{ systems_to_power_on + [item.item] }}"
+      loop: "{{ system_state_rows.results | default([]) }}"
+      vars:
+        state_output: "{{ item.Command_output | default(item.command_output) | default([]) }}"
+      when:
+        - managed_systems | length > 0
+        - (state_output | join('') | trim) != 'Operating'
+
+    - name: Power on managed systems that are not Operating
+      ibm.power_hmc.power_system:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        system_name: "{{ item }}"
+        action: poweron
+      loop: "{{ systems_to_power_on }}"
+      when: systems_to_power_on | length > 0
+
+    - name: Discover stopped VIOS partitions on each managed system
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: >-
+          lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env
+          | awk -F, '$2!="Running" && tolower($3)=="vioserver" {print $1}'
+      loop: "{{ managed_systems }}"
+      register: vios_rows
+      changed_when: false
+      when: managed_systems | length > 0
+
+    - name: Build stopped VIOS partition list
+      ansible.builtin.set_fact:
+        vios_to_power_on: >-
+          {{
+            vios_to_power_on
+            + (
+              (
+                row_output
+                if row_output is not string
+                else row_output.splitlines()
+              )
+              | map('trim')
+              | reject('equalto', '')
+              | map('regex_replace', '^', item.item ~ ',')
+              | list
+            )
+          }}
+      loop: "{{ vios_rows.results | default([]) }}"
+      vars:
+        row_output: "{{ item.Command_output | default(item.command_output) | default([]) }}"
+      when: managed_systems | length > 0
+
+    - name: Power on stopped VIOS partitions
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: >-
+          chsysstate -r lpar -m {{ item.split(',')[0] }}
+          -o on -n {{ item.split(',')[1] }}
+      loop: "{{ vios_to_power_on }}"
+      when: vios_to_power_on | length > 0
+
+    - name: Discover stopped non-VIOS LPARs on each managed system
+      ibm.power_hmc.hmc_command:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        cmd: >-
+          lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env
+          | awk -F, '$2!="Running" && tolower($3)!="vioserver" {print $1}'
+      loop: "{{ managed_systems }}"
+      register: lpar_rows
+      changed_when: false
+      when:
+        - managed_systems | length > 0
+        - requested_lpar_names | length > 0
+
+    - name: Build stopped requested non-VIOS LPAR list
+      ansible.builtin.set_fact:
+        lpars_to_power_on: >-
+          {{
+            lpars_to_power_on
+            + (
+              matching_names
+              | map('regex_replace', '^', item.item ~ ',')
+              | list
+            )
+          }}
+      loop: "{{ lpar_rows.results | default([]) }}"
+      vars:
+        row_output: "{{ item.Command_output | default(item.command_output) | default([]) }}"
+        matching_names: >-
+          {{
+            (
+              row_output
+              if row_output is not string
+              else row_output.splitlines()
+            )
+            | map('trim')
+            | reject('equalto', '')
+            | intersect(requested_lpar_names)
+            | list
+          }}
+      when:
+        - managed_systems | length > 0
+        - requested_lpar_names | length > 0
+
+    - name: Power on requested non-VIOS LPARs that are stopped
+      ibm.power_hmc.powervm_lpar_instance:
+        hmc_host: "{{ inventory_hostname }}"
+        hmc_auth: "{{ hmc_auth }}"
+        system_name: "{{ item.split(',')[0] }}"
+        vm_name: "{{ item.split(',')[1] }}"
+        action: poweron
+      loop: "{{ lpars_to_power_on }}"
+      when: lpars_to_power_on | length > 0
+
+    - name: Show power-up summary
+      ansible.builtin.debug:
+        msg:
+          managed_systems: "{{ managed_systems }}"
+          systems_powered_on: "{{ systems_to_power_on }}"
+          vios_powered_on: "{{ vios_to_power_on }}"
+          requested_lpar_names: "{{ requested_lpar_names }}"
+          lpars_powered_on: "{{ lpars_to_power_on }}"
