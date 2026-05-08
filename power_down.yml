@@ -22,12 +22,17 @@
       ansible.builtin.set_fact:
         managed_systems: >-
           {{
-            (systems_raw.Command_output | default(systems_raw.command_output) | default(''))
-            .splitlines()
+            (
+              systems_output
+              if systems_output is not string
+              else systems_output.splitlines()
+            )
             | map('trim')
             | reject('equalto', '')
             | list
           }}
+      vars:
+        systems_output: "{{ systems_raw.Command_output | default(systems_raw.command_output) | default([]) }}"
 
     - name: Initialize shutdown target lists
       ansible.builtin.set_fact:
@@ -49,9 +54,11 @@
       ansible.builtin.set_fact:
         running_systems: "{{ running_systems + [item.item] }}"
       loop: "{{ system_state_rows.results | default([]) }}"
+      vars:
+        state_output: "{{ item.Command_output | default(item.command_output) | default([]) }}"
       when:
         - managed_systems | length > 0
-        - (item.Command_output | default(item.command_output) | default('') | trim) == 'Operating'
+        - ((state_output | join('') | trim) == 'Operating')
 
     - name: Discover running non-VIOS partitions on each running system
       ibm.power_hmc.hmc_command:
@@ -69,8 +76,11 @@
           {{
             running_non_vios
             + (
-              (item.Command_output | default(item.command_output) | default(''))
-              .splitlines()
+              (
+                row_output
+                if row_output is not string
+                else row_output.splitlines()
+              )
               | select('search', ',Running,')
               | reject('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
               | map('split', ',')
@@ -80,6 +90,8 @@
             )
           }}
       loop: "{{ non_vios_rows.results | default([]) }}"
+      vars:
+        row_output: "{{ item.Command_output | default(item.command_output) | default([]) }}"
       when: running_systems | length > 0
 
     - name: Shut down running non-VIOS partitions with OS immediate
@@ -109,8 +121,11 @@
           {{
             running_vios
             + (
-              (item.Command_output | default(item.command_output) | default(''))
-              .splitlines()
+              (
+                row_output
+                if row_output is not string
+                else row_output.splitlines()
+              )
               | select('search', ',Running,')
               | select('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
               | map('split', ',')
@@ -120,6 +135,8 @@
             )
           }}
       loop: "{{ vios_rows.results | default([]) }}"
+      vars:
+        row_output: "{{ item.Command_output | default(item.command_output) | default([]) }}"
       when: running_systems | length > 0
 
     - name: Shut down all running VIOS partitions immediately
