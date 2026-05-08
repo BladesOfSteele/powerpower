@@ -42,7 +42,7 @@
       ansible.builtin.set_fact:
         requested_lpar_names: >-
           {{
-            lpar_names_csv.split(',')
+            (lpar_names_csv | default('')).split(',')
             | map('trim')
             | reject('equalto', '')
             | list
@@ -87,9 +87,7 @@
       ibm.power_hmc.hmc_command:
         hmc_host: "{{ inventory_hostname }}"
         hmc_auth: "{{ hmc_auth }}"
-        cmd: >-
-          lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env
-          | awk -F, '$2!="Running" && tolower($3)=="vioserver" {print $1}'
+        cmd: "lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env"
       loop: "{{ managed_systems }}"
       register: vios_rows
       changed_when: false
@@ -108,6 +106,10 @@
               )
               | map('trim')
               | reject('equalto', '')
+              | reject('search', ',Running,')
+              | select('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
+              | map('split', ',')
+              | map('first')
               | map('regex_replace', '^', item.item ~ ',')
               | list
             )
@@ -131,9 +133,7 @@
       ibm.power_hmc.hmc_command:
         hmc_host: "{{ inventory_hostname }}"
         hmc_auth: "{{ hmc_auth }}"
-        cmd: >-
-          lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env
-          | awk -F, '$2!="Running" && tolower($3)!="vioserver" {print $1}'
+        cmd: "lssyscfg -r lpar -m {{ item }} -F name,state,lpar_env"
       loop: "{{ managed_systems }}"
       register: lpar_rows
       changed_when: false
@@ -164,6 +164,10 @@
             )
             | map('trim')
             | reject('equalto', '')
+            | reject('search', ',Running,')
+            | reject('search', ',[Vv][Ii][Oo][Ss][Ee][Rr][Vv][Ee][Rr]$')
+            | map('split', ',')
+            | map('first')
             | intersect(requested_lpar_names)
             | list
           }}
