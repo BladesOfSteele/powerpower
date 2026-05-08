@@ -5,7 +5,7 @@
 
   vars:
     hmc_auth:
-      username: "{{ hmc_username }}"
+      username: hscroot
       password: "{{ hmc_password }}"
 
   tasks:
